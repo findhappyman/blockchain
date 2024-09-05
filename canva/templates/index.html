@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative Drawing</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
+    <style>
+        #canvas {
+            border: 1px solid black;
+        }
+        .controls {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .control-group {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <div class="controls">
+        <div class="control-group">
+            <button id="zoomIn">Zoom In</button>
+            <button id="zoomOut">Zoom Out</button>
+        </div>
+        <div class="control-group">
+            <button id="moveLeft">Left</button>
+            <button id="moveRight">Right</button>
+        </div>
+        <div class="control-group">
+            <button id="moveUp">Up</button>
+            <button id="moveDown">Down</button>
+        </div>
+        <div class="control-group">
+            <button id="clear">Clear</button>
+        </div>
+    </div>
+    <script>
+        const socket = io();
+        let web3;
+        let account;
+        let color = '#000000';
+        let drawing = false;
+        let dragging = false;
+        let lastX, lastY;
+        let offsetX = 0;
+        let offsetY = 0;
+        let scale = 1;
+        let drawings = [];
+
+        document.getElementById('connectButton').addEventListener('click', async () => {
+            if (window.ethereum) {
+                web3 = new Web3(window.ethereum);
+                try {
+                    await window.ethereum.request({ method: 'eth_requestAccounts' });
+                    const accounts = await web3.eth.getAccounts();
+                    account = accounts[0];
+                    alert(`Connected: ${account}`);
+                } catch (error) {
+                    console.error("User denied account access");
+                }
+            } else {
+                alert('Please install MetaMask!');
+            }
+        });
+
+        document.getElementById('colorPicker').addEventListener('input', (event) => {
+            color = event.target.value;
+        });
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        canvas.addEventListener('mousedown', (event) => {
+            if (event.button === 0) {
+                drawing = true;
+                const rect = canvas.getBoundingClientRect();
+                const x = (event.clientX - rect.left - offsetX) / scale;
+                const y = (event.clientY - rect.top - offsetY) / scale;
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                const drawData = { type: 'begin', x, y, color, scale, offsetX, offsetY };
+                drawings.push(drawData);
+                socket.emit('draw', drawData, (response) => {
+                    if (response.status === 'ok') {
+                        console.log('Begin draw event sent successfully');
+                    } else {
+                        console.error('Error sending begin draw event:', response.error);
+                    }
+                });
+            } else if (event.button === 2) {
+                dragging = true;
+                lastX = event.clientX;
+                lastY = event.clientY;
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            drawing = false;
+            dragging = false;
+        });
+
+        canvas.addEventListener('mousemove', (event) => {
+            if (drawing) {
+                draw(event);
+            } else if (dragging) {
+                drag(event);
+            }
+        });
+
+        canvas.addEventListener('wheel', zoom);
+
+        document.getElementById('zoomIn').addEventListener('click', () => {
+            zoomCanvas(0.1);
+        });
+
+        document.getElementById('zoomOut').addEventListener('click', () => {
+            zoomCanvas(-0.1);
+        });
+
+        document.getElementById('moveLeft').addEventListener('click', () => {
+            moveCanvas(-10, 0);
+        });
+
+        document.getElementById('moveRight').addEventListener('click', () => {
+            moveCanvas(10, 0);
+        });
+
+        document.getElementById('moveUp').addEventListener('click', () => {
+            moveCanvas(0, -10);
+        });
+
+        document.getElementById('moveDown').addEventListener('click', () => {
+            moveCanvas(0, 10);
+        });
+
+        function draw(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = (event.clientX - rect.left - offsetX) / scale;
+            const y = (event.clientY - rect.top - offsetY) / scale;
+            ctx.strokeStyle = color;
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            const drawData = { type: 'draw', x, y, color, scale, offsetX, offsetY };
+            drawings.push(drawData);
+            socket.emit('draw', drawData, (response) => {
+                if (response.status === 'ok') {
+                    console.log('Draw event sent successfully');
+                } else {
+                    console.error('Error sending draw event:', response.error);
+                }
+            });
+        }
+
+        function drag(event) {
+            const dx = event.clientX - lastX;
+            const dy = event.clientY - lastY;
+            offsetX += dx;
+            offsetY += dy;
+            lastX = event.clientX;
+            lastY = event.clientY;
+            redrawCanvas();
+            socket.emit('drag', { offsetX, offsetY, scale });
+        }
+
+        function zoom(event) {
+            event.preventDefault();
+            const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            const newScale = scale * zoomFactor;
+            offsetX = mouseX - (mouseX - offsetX) * (newScale / scale);
+            offsetY = mouseY - (mouseY - offsetY) * (newScale / scale);
+            scale = newScale;
+
+            redrawCanvas();
+            socket.emit('zoom', { offsetX, offsetY, scale });
+        }
+
+        function zoomCanvas(factor) {
+            const zoomFactor = factor > 0 ? 1.1 : 0.9;
+            const rect = canvas.getBoundingClientRect();
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+
+            const newScale = scale * zoomFactor;
+            offsetX = centerX - (centerX - offsetX) * (newScale / scale);
+            offsetY = centerY - (centerY - offsetY) * (newScale / scale);
+            scale = newScale;
+
+            redrawCanvas();
+            socket.emit('zoom', { offsetX, offsetY, scale });
+        }
+
+        function moveCanvas(dx, dy) {
+            offsetX += dx;
+            offsetY += dy;
+            redrawCanvas();
+            socket.emit('drag', { offsetX, offsetY, scale });
+        }
+
+        function redrawCanvas() {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+            
+            let currentPath = null;
+            drawings.forEach(drawOp => {
+                if (drawOp.type === 'begin') {
+                    if (currentPath) {
+                        ctx.stroke(currentPath);
+                    }
+                    currentPath = new Path2D();
+                    currentPath.moveTo(drawOp.x, drawOp.y);
+                    ctx.strokeStyle = drawOp.color;
+                } else if (drawOp.type === 'draw') {
+                    if (currentPath) {
+                        currentPath.lineTo(drawOp.x, drawOp.y);
+                    }
+                }
+            });
+            if (currentPath) {
+                ctx.stroke(currentPath);
+            }
+        }
+
+        function clearCanvas() {
+            drawings = [];
+            redrawCanvas();
+            socket.emit('clear');
+        }
+
+        socket.on('init_drawings', (initialDrawings) => {
+            drawings = initialDrawings;
+            redrawCanvas();
+        });
+
+        socket.on('draw', (data) => {
+            drawings.push(data);
+            redrawCanvas();
+        });
+
+        socket.on('clear', () => {
+            drawings = [];
+            redrawCanvas();
+        });
+
+        socket.on('drag', (data) => {
+            offsetX = data.offsetX;
+            offsetY = data.offsetY;
+            scale = data.scale;
+            redrawCanvas();
+        });
+
+        socket.on('zoom', (data) => {
+            offsetX = data.offsetX;
+            offsetY = data.offsetY;
+            scale = data.scale;
+            redrawCanvas();
+        });
+
+        socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+        });
+
+        socket.on('error', (error) => {
+            console.error('Socket.IO Error:', error);
+        });
+    </script>
+</body>
+</html>
